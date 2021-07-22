@@ -22,12 +22,12 @@ jobs=("philly_traces_7f04ca" "philly_traces_6214e9" "philly_traces_ee9e8c" "phil
 setups=("n32g4")
 multi_resources=3
 
-
+mkdir results
 for setup in ${setups[@]};do
     cluster_spec="${setup}.csv"
     for job in ${jobs[@]};do
         job_file="trace-data/${job}.csv"
-        log_folder="${setup}j${job}"
+        log_folder="results/${setup}j${job}"
         mkdir ${log_folder}
         echo ${job}
         for p in ${placement[@]};do
