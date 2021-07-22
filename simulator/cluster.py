@@ -95,7 +95,10 @@ class _Cluster(object):
         self.free_gpu = self.num_gpu
         for switch in self.switch_list:
             for node in switch.node_list:
-                node.init_node(self.num_gpu_p_node, self.num_cpu_p_node)
+                # if 'multi-resource' in FLAGS.schedule or 'shortest' in FLAGS.schedule:
+                node.init_node(self.num_gpu_p_node, self.num_cpu_p_node, self.mem_p_node)
+                # else:
+                #     node.init_node(self.num_gpu_p_node, self.num_cpu_p_node)
 
         if FLAGS.schedule == 'dlas-gpu-pack':
             self.init_dlas_pack_gpu() 
@@ -891,12 +894,12 @@ class _Cluster(object):
         # return node_release
 
 
-    def ms_yarn_placement(self, job):
+    def ms_yarn_placement(self, job, not_place=False):
         '''
         MS_YARN, all gpus should come from the same switch
         '''
         for switch in self.switch_list:
-            ret = switch.ms_yarn_alloc_res(job)
+            ret = switch.ms_yarn_alloc_res(job, not_place)
             if ret == True:
                 return True
             else:

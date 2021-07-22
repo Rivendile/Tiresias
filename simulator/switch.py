@@ -43,7 +43,7 @@ class _Switch(object):
         '''
         pass 
 
-    def try_cross_node_alloc(self, job):
+    def try_cross_node_alloc(self, job, not_place=False):
         '''
         used in MS_YARN placement
         try get gpus from multiple nodes
@@ -143,11 +143,12 @@ class _Switch(object):
             node_dict['tasks'] = list()
             node_list.append(node_dict)
 
-        JOBS.create_multi_nodes_placement(job, self.id, node_list)
+        if not_place==False:
+            JOBS.create_multi_nodes_placement(job, self.id, node_list)
         return True
 
 
-    def try_single_node_alloc(self, job):
+    def try_single_node_alloc(self, job, not_place=False):
         '''
         used in MS_YARN placement
         try get gpus from a single node
@@ -159,13 +160,17 @@ class _Switch(object):
         else:
             need_cpu = int(need_gpu * 6) # worker:2, ps:4
 
+        # print("try_single_node_alloc: ", need_gpu, need_cpu, JOBS.worker_mem)
+
         for node in self.node_list:
+            # print(node.id, node.check_free_gpus(), node.check_free_cpus(), node.free_mem)
             if (node.check_free_gpus() >= need_gpu) and (node.check_free_cpus() >= need_cpu) and (node.free_mem >= JOBS.worker_mem):
                 # if node.alloc_gpus(need_gpu) == False:
                 if node.alloc_job_res(need_gpu, need_cpu) == False:
                     continue
                 node.free_mem = node.free_mem - JOBS.worker_mem
-                traffic = JOBS.create_single_node_placement(job, self.id, node.id, need_gpu, need_cpu, JOBS.worker_mem)
+                if not_place==False:
+                    traffic = JOBS.create_single_node_placement(job, self.id, node.id, need_gpu, need_cpu, JOBS.worker_mem)
                 # node.add_network_load(traffic, traffic)
 
                 return True
@@ -194,7 +199,7 @@ class _Switch(object):
 
         return ret
 
-    def ms_yarn_alloc_res(self, job):
+    def ms_yarn_alloc_res(self, job, not_place=False):
         '''
         ms_yarn allocates res from a single switch, 
         if no enough gpus, give up, return False (all-or-nothing)
@@ -207,9 +212,9 @@ class _Switch(object):
         need_gpu = job['num_gpu']
         ret = False
         if need_gpu > self.num_gpu_p_node:
-            ret = self.try_cross_node_alloc(job)
+            ret = self.try_cross_node_alloc(job, not_place)
         else:
-            ret = self.try_single_node_alloc(job)
+            ret = self.try_single_node_alloc(job, not_place)
 
         return ret
 

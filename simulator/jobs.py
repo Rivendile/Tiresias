@@ -12,13 +12,15 @@ RUNNING: running job
 END: completed
 ERROR
 '''
-import numpy
+# import numpy
 import math
 import util
 import models
 import csv
 import time
 import sys
+import random
+import copy
 # import cluster
 # from switch import _Switch
 # from node import _Node
@@ -111,7 +113,6 @@ class _TFJobs(object):
         #sim-gpu-demands
         self.gpu_job = dict()
 
-
         #gittins static delta
         self.gittins_delta = 3250
 
@@ -176,16 +177,19 @@ class _TFJobs(object):
 
     def add_job(self, job_dict):
         ''' Add job (job_dict) into job_list'''
+        job_dict['resource_time'] = list()
         for key, value in job_dict.items():
         # for key, value in job_dict.iteritems():
-            if value is None:
+            if (value is None) or ('resource_time' == key):
                 continue
-            if value.isdigit():
+            if 'resource_time' in key and value.isdigit():
+                job_dict['resource_time'].append(float(value))
+            elif value.isdigit():
                 job_dict[key] = int(value)
         job_dict['duration'] = int(float(job_dict['duration']))
         # job_dict['duration'] = int(job_dict['duration'])
 
-        job_dict['rank'] = sys.maxint
+        job_dict['rank'] = sys.maxsize
 
 
         if 'start_time' not in job_dict:
@@ -194,13 +198,27 @@ class _TFJobs(object):
             job_dict['end_time'] = 0
         if 'pending_time' not in job_dict:
             job_dict['pending_time'] = 0
+        # if no resource time is provided, we assume there are 3 resources and rand their time
+        if 'multi-resource' in FLAGS.schedule:
+            job_dict['executed_iteration'] = 0.0
+            job_dict['remaining_iteration'] = float(job_dict['iterations'])
+            job_dict['iteration_time'] = float(job_dict['duration'])/float(job_dict['iterations'])
+            job_dict['iteration_time_cur'] = float(job_dict['duration'])/float(job_dict['iterations'])
+            if len(job_dict['resource_time']) == 0:
+                tmp_resource = [random.uniform(1.0, 10.0) for i in range(FLAGS.multi_resource)]
+                tmp_resource_sum = sum(tmp_resource)
+                tmp_resource_time = [tmp_resource[i]/tmp_resource_sum * float(job_dict['iteration_time']) for i in range(FLAGS.multi_resource) ]
+                tmp_resource_time[-1] = float(job_dict['iteration_time']) - sum(tmp_resource_time[:-1])
+                job_dict['resource_time'] = copy.deepcopy(tmp_resource_time)
 
         if 'submit_time' in job_dict:
             job_dict['r_submit_time'] = int(-1 * job_dict['submit_time'])
 
-        job_dict['start_time'] = sys.maxint
+        job_dict['start_time'] = sys.maxsize
         job_dict['end_time'] = 0
         job_dict['pending_time'] = 0
+
+        job_dict['packing_used'] = False
 
         # How much time this job has been executed? For preemption algorithms, this should be accumulated
         job_dict['execution_time'] = 0
@@ -433,10 +451,11 @@ class _TFJobs(object):
         ''' job gets into the system: pending or running, and finally END'''
         #job not started yet
         job['status'] = 'PENDING'
-        job['start_time'] = sys.maxint
+        job['start_time'] = sys.maxsize
         job['last_start_time'] = 0
         job['last_check_time'] = job['submit_time']
         job['total_executed_time'] = 0 # total
+        job['total_executed_gputime'] = 0
         job['executed_time'] = 0 # used for deciding priority queue, may be zeroed by last_pending_time
         job['pending_time'] = 0
         job['last_pending_time'] = 0 # how much pending_time the job has since last entering the highest priority queue
@@ -444,6 +463,9 @@ class _TFJobs(object):
         if FLAGS.schedule == 'multi-dlas-gpu':
             num_gpu = job['num_gpu']
             self.gpu_job[num_gpu].runnable_jobs.append(job)
+        elif 'multi-resource' in FLAGS.schedule:
+            job['executed_iteration'] = 0
+            self.runnable_jobs.append(job)
         else:
             self.runnable_jobs.append(job)
     
@@ -698,7 +720,6 @@ class _TFJobs(object):
         self.reserve_gpus(total_num)
 
 JOBS = _TFJobs()
-
 
 _allowed_symbols = [
     'JOBS'

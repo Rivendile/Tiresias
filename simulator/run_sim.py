@@ -16,6 +16,7 @@ import jobs
 import cluster
 import log
 import lp
+from matching import Matching_Same, Matching_Split
 
 # import hosts
 # import placement_scheme as scheme
@@ -51,6 +52,10 @@ flags.DEFINE_string('schedule', 'fifo',
                 6.shortest-gpu, shortest-remaining-gputime job first 
                 7.dlas, discretized las 
                 8.dlas-gpu, dlas using gpu time
+                9.multi-resource-split, will split the job during matching
+                10.multi-resource-split-gpu, will split the job during matching, using gpu time
+                11.multi-resource-same, only match jobs with same #GPU
+                12.multi-resource-same-gpu, only match jobs with same #GPU, using gpu time
                 Default is fifo''')
 # flags.DEFINE_string('scheme', 'random',
 #                 ''' TF job placement scheme (PS, and workers). 
@@ -75,6 +80,9 @@ flags.DEFINE_string('cluster_spec', None,
                 Spec format:
                     num_switch,num_node_p_switch,num_gpu_p_node
                     int,int,int''')
+# for multi_resource sharing
+flags.DEFINE_integer('multi_resource', 4, 
+                '''Part of job spec: the num of resources used for each job, default is 4''')
 
 flags.DEFINE_boolean('print', False, 
                 '''Enable print out information, default is False''')
@@ -178,12 +186,12 @@ def parse_cluster_spec():
 '''
 Allocate job resource
 '''
-def try_get_job_res(job):
+def try_get_job_res(job, not_place=False):
     '''
     select placement scheme
     '''
     if FLAGS.scheme == 'yarn':
-        ret = CLUSTER.ms_yarn_placement(job)
+        ret = CLUSTER.ms_yarn_placement(job, not_place)
     elif FLAGS.scheme == 'balance':
         ret = lp.placement(job)
         # ret = lp.min_new_job(job)
@@ -394,62 +402,6 @@ def fit_first_sim_jobs():
 
         LOG.checkpoint(event_time)
 
-# def smallest_first_sim_jobs():
-#     '''
-#     new jobs are added to the end of the ending queue
-#     but in the queue, smallest (gpu) job first be served, until no resource
-#     '''
-#     while (len(JOBS.job_events) + len(JOBS.pending_jobs))> 0:
-#         if len(JOBS.job_events) == 0:
-#             util.print_fn("This cluster is not large enough to run the job")
-#             break
-
-#         event = JOBS.job_events[0]
-#         event_time = event['time']
-#         # util.print_fn('--------------------------------- Handle event[time %d]------------------------------------' % event_time)
-#         #for ending jobs, release gpu
-#         for e_job in event['end_jobs']:
-#             #remove from migratable jobs, if it's there
-#             # JOBS.remote_migratable(e_job)
-
-#             #job completes
-#             CLUSTER.release_job_res(e_job)
-#             # CLUSTER.release_gpus(e_job)
-#             LOG.job_complete(e_job, event_time)
-
-
-#         #for new-start jobs, try to start
-#         for s_job in event['start_jobs']:
-#             #add into pending list
-#             JOBS.move_to_pending(s_job)
-
-#         #sort pending jobs based on the num_gpu
-#         JOBS.pending_jobs.sort(key = lambda e:e.__getitem__('num_gpu'))
-
-#         new_start_list = list()
-#         for p_job in JOBS.pending_jobs:
-#             # ret = CLUSTER.alloc_gpus(p_job)
-#             ret = try_get_job_res(p_job)
-#             if ret == True:
-#                 ''' if remove_from_pending, then will miss the next p_job in the list '''
-#                 new_start_list.append(p_job)
-#                 # JOBS.remove_from_pending(p_job, event_time)
-#                 # JOBS.add_job_end_event(p_job)
-#                 # util.print_fn('----job[%d] starts from pending' % p_job['job_idx'])
-#             else:
-#                 break
-
-#         for ns_job in new_start_list:
-#             JOBS.remove_from_pending(ns_job, event_time)
-#             JOBS.add_job_end_event(ns_job)
-#             util.print_fn('----job[%d] starts from pending' % ns_job['job_idx'])
-
-#         #remove time_event
-#         JOBS.job_events.pop(0)
-#         JOBS.job_events.sort(key = lambda e:e.__getitem__('time'))
-#         # JOBS.print_job_events()
-
-#         LOG.checkpoint(event_time)
 
 def smallest_first_sim_jobs(gputime=False):
     '''
@@ -463,11 +415,11 @@ def smallest_first_sim_jobs(gputime=False):
             break
 
         #decide which is the next event: start or end  ?
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
@@ -479,7 +431,7 @@ def smallest_first_sim_jobs(gputime=False):
             event_time = start_time
             # print("start-time %d, end_time %d" % (start_time, end_time))
             event = JOBS.job_events.pop(0)
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             event = JOBS.job_events.pop(0)
             event['end_jobs'] = end_events[0]['end_jobs']
@@ -540,7 +492,7 @@ def smallest_first_sim_jobs(gputime=False):
                 # rjob['status'] = 'RUNNING'
                 # if 0 == rjob['start_time'] and 0 != rjob['submit_time']:
                 #     rjob['start_time'] = event_time
-                if sys.maxint == rjob['start_time']:
+                if sys.maxsize == rjob['start_time']:
                     rjob['start_time'] = event_time
                 if rjob['status'] == 'PENDING':
                     run_jobs.append(rjob)
@@ -578,6 +530,7 @@ def smallest_first_sim_jobs(gputime=False):
 
         LOG.checkpoint(event_time)
 
+
 def cal_shortest_expected_remaining(job_data, a):
     data = job_data['data']
     idx = next(x[0] for x in enumerate(data) if x[1] > a)
@@ -601,11 +554,11 @@ def shortest_first_sim_jobs(gputime=False):
             break
 
         #decide which is the next event: start or end  ?
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
@@ -617,7 +570,7 @@ def shortest_first_sim_jobs(gputime=False):
             event_time = start_time
             # print("start-time %d, end_time %d" % (start_time, end_time))
             event = JOBS.job_events.pop(0)
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             event = JOBS.job_events.pop(0)
             event['end_jobs'] = end_events[0]['end_jobs']
@@ -685,7 +638,7 @@ def shortest_first_sim_jobs(gputime=False):
                 # rjob['status'] = 'RUNNING'
                 # if 0 == rjob['start_time'] and 0 != rjob['submit_time']:
                 #     rjob['start_time'] = event_time
-                if sys.maxint == rjob['start_time']:
+                if sys.maxsize == rjob['start_time']:
                     rjob['start_time'] = event_time
                 if rjob['status'] == 'PENDING':
                     run_jobs.append(rjob)
@@ -733,7 +686,7 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
     TODO: each job category has separate dlas-scheduler queues; 
     '''
     end_events = list()
-    next_job_jump = sys.maxint
+    next_job_jump = sys.maxsize
     #interval for update cluster resource allocation
     reserve_interval = 600
     next_reserve = reserve_interval
@@ -745,19 +698,19 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
 
         #decide which is the next event: start or end  ?
         start_event = None
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
         end_event = None
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
         
-        event_time = sys.maxint
+        event_time = sys.maxsize
         event = dict()
-        event['time'] = sys.maxint
+        event['time'] = sys.maxsize
         if end_time < start_time:
             event_time = end_time
             event = end_event
@@ -765,7 +718,7 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
@@ -813,9 +766,9 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
 
         #update end events and sort, and get the most recent one
         del end_events[:]
-        min_end_time = sys.maxint
+        min_end_time = sys.maxsize
         tmp_end_event = dict()
-        next_job_jump = sys.maxint
+        next_job_jump = sys.maxsize
 
         for num_gpu, gjob in JOBS.gpu_job.items(): 
             if len(gjob.runnable_jobs) <= 0:
@@ -898,7 +851,7 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
             for job in run_jobs:
                 job['status'] = 'RUNNING'
                 job['resume'] = int(job['resume'] + 1)
-                if job['start_time'] == sys.maxint:
+                if job['start_time'] == sys.maxsize:
                     job['start_time'] = event_time
 
 
@@ -906,7 +859,7 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
             for queue in gjob.queues:
                 pending_job = list()
                 for job in queue: 
-                    # if sys.maxint == job['start_time'] and job['status'] == 'PENDING':
+                    # if sys.maxsize == job['start_time'] and job['status'] == 'PENDING':
                     if job['status'] == 'PENDING':
                         pending_job.append(job)
                         # print(job['job_idx'])
@@ -947,7 +900,7 @@ def multi_dlas_sim_jobs(gputime=False, solve_starvation=0):
                             if jump_time < next_job_jump:
                                 next_job_jump = jump_time
                     
-        if min_end_time < sys.maxint:
+        if min_end_time < sys.maxsize:
             end_events.append(tmp_end_event)
 
         LOG.checkpoint_multi_dlas_gpu(event_time)    
@@ -970,7 +923,7 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
     TODO:  2. add move_back for avoiding starvation
     '''
     end_events = list()
-    next_job_jump = sys.maxint
+    next_job_jump = sys.maxsize
     while (len(JOBS.job_events) + len(JOBS.runnable_jobs))> 0:
         if (len(JOBS.job_events) + len(end_events)) == 0:
             util.print_fn("This cluster is not large enough to run the job")
@@ -978,19 +931,19 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
 
         #decide which is the next event: start or end  ?
         start_event = None
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
         end_event = None
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
         
-        event_time = sys.maxint
+        event_time = sys.maxsize
         event = dict()
-        event['time'] = sys.maxint
+        event['time'] = sys.maxsize
         if end_time < start_time:
             event_time = end_time
             event = end_event
@@ -998,7 +951,7 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
@@ -1125,7 +1078,7 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
         for job in run_jobs:
             job['status'] = 'RUNNING'
             job['resume'] = int(job['resume'] + 1)
-            if job['start_time'] == sys.maxint:
+            if job['start_time'] == sys.maxsize:
                 job['start_time'] = event_time
 
 
@@ -1134,7 +1087,7 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
             #job there are many students            
             pending_job = list()
             for job in queue: 
-                # if sys.maxint == job['start_time'] and job['status'] == 'PENDING':
+                # if sys.maxsize == job['start_time'] and job['status'] == 'PENDING':
                 if job['status'] == 'PENDING':
                     pending_job.append(job)
                     # print(job['job_idx'])
@@ -1200,7 +1153,7 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
         #         else:
         #             tmp_dict['end_jobs'].append(rjob)
         # end_events.sort(key = lambda e:e.__getitem__('time'))
-        min_end_time = sys.maxint
+        min_end_time = sys.maxsize
         tmp_end_event = dict()
         for rjob in JOBS.runnable_jobs:
             if 'RUNNING' == rjob['status']:
@@ -1213,17 +1166,17 @@ def dlas_sim_jobs(gputime=False, solve_starvation=0):
                     min_end_time = end_time
                 elif min_end_time == end_time:
                     tmp_end_event['end_jobs'].append(rjob)
-        if min_end_time < sys.maxint:
+        if min_end_time < sys.maxsize:
             end_events.append(tmp_end_event)
 
         # what's the closest queue_jump (demotion, and promotion) among all the jobs
-        next_job_jump = sys.maxint
+        next_job_jump = sys.maxsize
         for rjob in JOBS.runnable_jobs:
             if 'RUNNING' == rjob['status']:
                 qid = rjob['q_id']
                 if qid < int(JOBS.num_queue - 1):
                     if gputime:
-                        jump_time = int(math.ceil((JOBS.queue_limit[qid] - rjob['executed_time'])/rjob['num_gpu']) + event_time)
+                        jump_time = int(math.ceil(JOBS.queue_limit[qid]/rjob['num_gpu']) - rjob['executed_time'] + event_time)
                     else:
                         jump_time = int(JOBS.queue_limit[qid] - rjob['executed_time'] + event_time)
                     if jump_time < next_job_jump:
@@ -1255,7 +1208,7 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
     '''
     solve_starvation = 0
     end_events = list()
-    next_job_jump = sys.maxint
+    next_job_jump = sys.maxsize
     next_gittins_unit = copy.copy(JOBS.gittins_delta)
 
     while (len(JOBS.job_events) + len(JOBS.runnable_jobs))> 0:
@@ -1265,19 +1218,19 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
 
         #decide which is the next event: start or end  ?
         start_event = None
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
         end_event = None
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
         
-        event_time = sys.maxint
+        event_time = sys.maxsize
         event = dict()
-        event['time'] = sys.maxint
+        event['time'] = sys.maxsize
         if end_time < start_time:
             event_time = end_time
             event = end_event
@@ -1285,7 +1238,7 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
@@ -1422,7 +1375,7 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
         for job in run_jobs:
             job['status'] = 'RUNNING'
             job['resume'] = int(job['resume'] + 1)
-            if job['start_time'] == sys.maxint:
+            if job['start_time'] == sys.maxsize:
                 job['start_time'] = event_time
 
 
@@ -1431,7 +1384,7 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
         #     #job there are many students            
         #     pending_job = list()
         #     for job in queue: 
-        #         # if sys.maxint == job['start_time'] and job['status'] == 'PENDING':
+        #         # if sys.maxsize == job['start_time'] and job['status'] == 'PENDING':
         #         if job['status'] == 'PENDING':
         #             pending_job.append(job)
         #             # print(job['job_idx'])
@@ -1457,7 +1410,7 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
         #         else:
         #             tmp_dict['end_jobs'].append(rjob)
         # end_events.sort(key = lambda e:e.__getitem__('time'))
-        min_end_time = sys.maxint
+        min_end_time = sys.maxsize
         tmp_end_event = dict()
         for rjob in JOBS.runnable_jobs:
             if 'RUNNING' == rjob['status']:
@@ -1470,11 +1423,11 @@ def gittins_sim_jobs(job_dist_data, gputime=False, static_delta=True):
                     min_end_time = end_time
                 elif min_end_time == end_time:
                     tmp_end_event['end_jobs'].append(rjob)
-        if min_end_time < sys.maxint:
+        if min_end_time < sys.maxsize:
             end_events.append(tmp_end_event)
 
         # what's the closest queue_jump (demotion, and promotion) among all the jobs
-        # next_job_jump = sys.maxint
+        # next_job_jump = sys.maxsize
         # for rjob in JOBS.runnable_jobs:
         #     if 'RUNNING' == rjob['status']:
         #         qid = rjob['q_id']
@@ -1514,7 +1467,7 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
     TODO:  2. add move_back for avoiding starvation
     '''
     end_events = list()
-    next_job_jump = sys.maxint
+    next_job_jump = sys.maxsize
     while (len(JOBS.job_events) + len(JOBS.runnable_jobs))> 0:
         if (len(JOBS.job_events) + len(end_events)) == 0:
             util.print_fn("This cluster is not large enough to run the job")
@@ -1522,19 +1475,19 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
 
         #decide which is the next event: start or end  ?
         start_event = None
-        start_time = sys.maxint
+        start_time = sys.maxsize
         if len(JOBS.job_events) > 0:
             start_event = JOBS.job_events[0]
             start_time = start_event['time']
         end_event = None
-        end_time = sys.maxint
+        end_time = sys.maxsize
         if len(end_events) > 0:
             end_event = end_events[0]
             end_time = end_event['time']
         
-        event_time = sys.maxint
+        event_time = sys.maxsize
         event = dict()
-        event['time'] = sys.maxint
+        event['time'] = sys.maxsize
         if end_time < start_time:
             event_time = end_time
             event = end_event
@@ -1542,7 +1495,7 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
-        elif end_time == start_time and end_time != sys.maxint:
+        elif end_time == start_time and end_time != sys.maxsize:
             event_time = start_time
             # event = JOBS.job_events.pop(0)
             event = start_event
@@ -1654,7 +1607,7 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
         for job in run_jobs:
             job['status'] = 'RUNNING'
             job['resume'] = int(job['resume'] + 1)
-            if job['start_time'] == sys.maxint:
+            if job['start_time'] == sys.maxsize:
                 job['start_time'] = event_time
 
 
@@ -1663,7 +1616,7 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
             #job there are many students            
             pending_job = list()
             for job in queue: 
-                # if sys.maxint == job['start_time'] and job['status'] == 'PENDING':
+                # if sys.maxsize == job['start_time'] and job['status'] == 'PENDING':
                 if job['status'] == 'PENDING':
                     pending_job.append(job)
                     # print(job['job_idx'])
@@ -1729,7 +1682,7 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
         #         else:
         #             tmp_dict['end_jobs'].append(rjob)
         # end_events.sort(key = lambda e:e.__getitem__('time'))
-        min_end_time = sys.maxint
+        min_end_time = sys.maxsize
         tmp_end_event = dict()
         for rjob in JOBS.runnable_jobs:
             if 'RUNNING' == rjob['status']:
@@ -1742,11 +1695,11 @@ def dlas_pack_sim_jobs(gputime=False, solve_starvation=0):
                     min_end_time = end_time
                 elif min_end_time == end_time:
                     tmp_end_event['end_jobs'].append(rjob)
-        if min_end_time < sys.maxint:
+        if min_end_time < sys.maxsize:
             end_events.append(tmp_end_event)
 
         # what's the closest queue_jump (demotion, and promotion) among all the jobs
-        next_job_jump = sys.maxint
+        next_job_jump = sys.maxsize
         for rjob in JOBS.runnable_jobs:
             if 'RUNNING' == rjob['status']:
                 qid = rjob['q_id']
@@ -1829,6 +1782,417 @@ def longest_pending_first_sim_jobs():
 
         LOG.checkpoint(event_time)
 
+
+def multi_resource_split_sim_jobs(gputime=False, know_duration=True):
+    '''
+    new jobs are added to the end of the ending queue
+    but in the queue, shortest (gpu) job first be served
+    and pack other jobs according to bipartie graph matching
+    NOT FINISHED!!!
+    TO DO: how to calc the iter time
+    '''
+    end_events = list()
+    while (len(JOBS.job_events) + len(JOBS.runnable_jobs))> 0:
+        if (len(JOBS.job_events) + len(end_events)) == 0:
+            util.print_fn("This cluster is not large enough to run the job")
+            break
+
+        #decide which is the next event: start or end  ?
+        start_time = sys.float_info.max
+        if len(JOBS.job_events) > 0:
+            start_event = JOBS.job_events[0]
+            start_time = start_event['time']
+        end_time = sys.float_info.max
+        if len(end_events) > 0:
+            end_event = end_events[0]
+            end_time = end_event['time']
+
+        if math.isclose(end_time, start_time, rel_tol=1e-4) and end_time < sys.maxsize:
+            event_time = start_time
+            event = JOBS.job_events.pop(0)
+            event['end_jobs'] = end_events[0]['end_jobs']
+        elif end_time < start_time:
+            event_time = end_time
+            event = end_events[0]
+        elif end_time > start_time:        
+            event_time = start_time
+            # print("start-time %d, end_time %d" % (start_time, end_time))
+            event = JOBS.job_events.pop(0)
+
+        assert math.isclose(event_time, event['time'], rel_tol=1e-4)
+
+        #for ending jobs, release gpu
+        if 'end_jobs' in event:
+            for e_job in event['end_jobs']:
+                #job completes
+                CLUSTER.release_job_res(e_job)
+                # CLUSTER.release_gpus(e_job)
+                LOG.job_complete(e_job, event_time)
+                JOBS.runnable_jobs.remove(e_job)
+
+
+        #for new-start jobs, add to runnable
+        if 'start_jobs' in event:
+            for s_job in event['start_jobs']:
+                #add into runnable list with pending status
+                JOBS.move_to_runnable(s_job)
+
+                s_job['remaining_time'] = s_job['duration']
+                s_job['remaining_gputime'] = float(s_job['remaining_time'] * s_job['num_gpu'])
+                s_job['total_executed_time'] = 0.0
+                s_job['total_executed_gputime'] = 0.0
+                util.print_fn('---- job[%d] is added' % s_job['job_idx'])
+
+        for rjob in JOBS.runnable_jobs:
+            if 'RUNNING' == rjob['status']:
+                tmp = float(event_time - rjob['last_check_time']) 
+                rjob['total_executed_time'] = float(rjob['total_executed_time'] + tmp/rjob['iteration_time_cur']*rjob['iteration_time'])
+                rjob['last_check_time'] = event_time
+                rjob['remaining_time'] = float(rjob['duration'] - rjob['total_executed_time'])
+                if FLAGS.schedule == 'shortest-expected':
+                    s_job['remaining_expected'] = cal_shortest_expected_remaining(JOBS.job_dist_data, rjob['total_executed_time'])
+                if gputime:
+                    rjob['remaining_gputime'] = float(rjob['remaining_time'] * rjob['num_gpu'])
+                    if not know_duration:
+                        rjob['total_executed_gputime'] = float(rjob['total_executed_time'] * rjob['num_gpu'])
+            elif 'PENDING' == rjob['status']:
+                tmp = float(event_time - rjob['last_check_time'])
+                rjob['pending_time'] = float(rjob['pending_time'] + tmp)
+                rjob['last_check_time'] = event_time
+            elif 'END' == rjob['status']: #almost impossible
+                JOBS.runnable_jobs.remove(rjob)
+                pass
+        #sort jobs with shortest first
+        if know_duration: 
+            if gputime:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('remaining_gputime'))
+            else:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('remaining_time'))
+        else:
+            if gputime:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('total_executed_gputime'))
+            else:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('total_executed_time'))
+
+        run_jobs = list()
+        waiting_jobs = list()
+        run_jobs_list = list()
+        preempt_jobs = list()
+        for rjob in JOBS.runnable_jobs:
+            waiting_jobs.append(rjob)
+        #scan / execute jobs one by one
+        for i in range(FLAGS.multi_resource):
+            run_jobs_list.append(list())
+            CLUSTER.empty_infra()
+            waiting_jobs_tmp = list()
+            for rjob in waiting_jobs: 
+                ret = try_get_job_res(rjob) 
+                if ret == True:
+                    # if sys.maxsize == rjob['start_time']:
+                    #     rjob['start_time'] = event_time
+                    # if rjob['status'] == 'PENDING':
+                    #     run_jobs.append(rjob)
+                    run_jobs_list[i].append(rjob)
+                else:
+                    # if rjob['status'] == 'RUNNING':
+                    #     preempt_jobs.append(rjob)
+                    waiting_jobs_tmp.append(rjob)
+                    continue
+            waiting_jobs = waiting_jobs_tmp
+        
+        # clear the cluster and running jobs
+        CLUSTER.empty_infra()
+        for rjob in JOBS.runnable_jobs:
+            if 'RUNNING' == rjob['status']:
+                if 'placements' in rjob: 
+                    del rjob['placements'][:]
+        
+        # executed_jobs = list()
+        # for rjob in run_jobs_list[i]:
+            
+        # matching algorithm
+        packing = Matching_Split.run(run_jobs_list)
+
+        # TO DO: deal with the packing plan
+        
+
+
+        for job in preempt_jobs:
+            job['status'] = 'PENDING'
+            job['preempt'] = int(job['preempt'] + 1)
+        for job in run_jobs:
+            job['status'] = 'RUNNING'
+            job['resume'] = int(job['resume'] + 1)
+
+        # get the next end_event
+        del end_events[:]
+        for rjob in JOBS.runnable_jobs:
+            if 'RUNNING' == rjob['status']:
+                end_time = float(event_time + rjob['remaining_time']/rjob['iteration_time']*rjob['iteration_time_cur'])
+                tmp_dict = util.search_dict_list(end_events, 'time', end_time)
+                if tmp_dict == None:
+                    #not found, add the time into to job_events
+                    tmp_dict = dict()
+                    tmp_dict['time'] = end_time
+                    tmp_dict['end_jobs'] = list()
+                    tmp_dict['end_jobs'].append(rjob)
+                    end_events.append(tmp_dict)
+                else:
+                    tmp_dict['end_jobs'].append(rjob)
+        end_events.sort(key = lambda e:e.__getitem__('time'))
+
+
+        LOG.checkpoint(event_time)        
+
+def multi_resource_same_sim_jobs(gputime=False, know_duration=True):
+    '''
+    new jobs are added to the end of the ending queue
+    but in the queue, shortest (gpu) job first be served
+    and pack other jobs with the same #GPU according to 
+    bipartie graph matching
+    NOT FINISHED!!!
+    TO DO: unpack if the performance is not improved
+    '''
+    end_events = list()
+    while (len(JOBS.job_events) + len(JOBS.runnable_jobs))> 0:
+        if (len(JOBS.job_events) + len(end_events)) == 0:
+            util.print_fn("This cluster is not large enough to run the job")
+            break
+
+        #decide which is the next event: start or end  ?
+        start_time = sys.float_info.max
+        if len(JOBS.job_events) > 0:
+            start_event = JOBS.job_events[0]
+            start_time = start_event['time']
+        end_time = sys.float_info.max
+        if len(end_events) > 0:
+            end_event = end_events[0]
+            end_time = end_event['time']
+
+        if math.isclose(end_time, start_time, rel_tol=1e-4) and end_time < sys.maxsize:
+            event_time = start_time
+            event = JOBS.job_events.pop(0)
+            event['end_jobs'] = end_events[0]['end_jobs']
+        elif end_time < start_time:
+            event_time = end_time
+            event = end_events[0]
+        elif end_time > start_time:        
+            event_time = start_time
+            # print("start-time %d, end_time %d" % (start_time, end_time))
+            event = JOBS.job_events.pop(0)
+
+        assert math.isclose(event_time, event['time'], rel_tol=1e-4)
+
+        #for ending jobs, release gpu
+        if 'end_jobs' in event:
+            for e_job in event['end_jobs']:
+                #job completes
+                CLUSTER.release_job_res(e_job)
+                # CLUSTER.release_gpus(e_job)
+                LOG.job_complete(e_job, event_time)
+                JOBS.runnable_jobs.remove(e_job)
+
+
+        #for new-start jobs, add to runnable
+        if 'start_jobs' in event:
+            for s_job in event['start_jobs']:
+                #add into runnable list with pending status
+                JOBS.move_to_runnable(s_job)
+
+                s_job['remaining_time'] = s_job['duration']
+                s_job['remaining_gputime'] = float(s_job['remaining_time'] * s_job['num_gpu'])
+                s_job['total_executed_time'] = 0.0
+                s_job['total_executed_gputime'] = 0.0
+                util.print_fn('---- job[%d] is added' % s_job['job_idx'])
+
+        for rjob in JOBS.runnable_jobs:
+            if 'RUNNING' == rjob['status']:
+                tmp = float(event_time - rjob['last_check_time']) 
+                rjob['total_executed_time'] = float(rjob['total_executed_time'] + tmp/rjob['iteration_time_cur']*rjob['iteration_time'])
+                rjob['last_check_time'] = event_time
+                rjob['remaining_time'] = float(rjob['duration'] - rjob['total_executed_time'])
+                if FLAGS.schedule == 'shortest-expected':
+                    s_job['remaining_expected'] = cal_shortest_expected_remaining(JOBS.job_dist_data, rjob['total_executed_time'])
+                if gputime:
+                    rjob['remaining_gputime'] = float(rjob['remaining_time'] * rjob['num_gpu'])
+                    if not know_duration:
+                        rjob['total_executed_gputime'] = float(rjob['total_executed_time'] * rjob['num_gpu'])
+            elif 'PENDING' == rjob['status']:
+                tmp = float(event_time - rjob['last_check_time'])
+                rjob['pending_time'] = float(rjob['pending_time'] + tmp)
+                rjob['last_check_time'] = event_time
+            elif 'END' == rjob['status']: #almost impossible
+                JOBS.runnable_jobs.remove(rjob)
+                pass
+        #sort jobs with shortest first
+        if know_duration: 
+            if gputime:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('remaining_gputime'))
+            else:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('remaining_time'))
+        else:
+            if gputime:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('total_executed_gputime'))
+            else:
+                JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('total_executed_time'))
+        
+
+        run_jobs = list()
+        waiting_jobs = list()
+        run_jobs_list = list()
+        preempt_jobs = list()
+        for rjob in JOBS.runnable_jobs:
+            waiting_jobs.append(rjob)
+            rjob['packing_used'] = False
+            # print("pre packing: ", rjob['job_idx'], rjob['placements'])
+        #scan / execute jobs one by one
+        GPU_num_dict = dict()
+        for i in range(FLAGS.multi_resource):
+            run_jobs_list.append(list())
+            waiting_jobs_tmp = list()
+            GPU_num_dict_tmp = copy.deepcopy(GPU_num_dict)
+            if i == 0:
+                CLUSTER.empty_infra()
+            for rjob in waiting_jobs: 
+                if i == 0:
+                    ret = try_get_job_res(rjob, True)
+                else :
+                    if (rjob['num_gpu'] in GPU_num_dict_tmp) and (GPU_num_dict_tmp[rjob['num_gpu']]>0):
+                        ret = True
+                        GPU_num_dict_tmp[rjob['num_gpu']] -= 1
+                    else:
+                        ret = False
+                if ret == True:
+                    # if sys.maxsize == rjob['start_time']:
+                    #     rjob['start_time'] = event_time
+                    # if rjob['status'] == 'PENDING':
+                    #     run_jobs.append(rjob)
+                    run_jobs_list[i].append(rjob)
+                    if i==0:
+                        if rjob['num_gpu'] not in GPU_num_dict:
+                            GPU_num_dict[rjob['num_gpu']] = 1
+                        else:
+                            GPU_num_dict[rjob['num_gpu']] += 1    
+                else:
+                    # if rjob['status'] == 'RUNNING':
+                    #     preempt_jobs.append(rjob)
+                    waiting_jobs_tmp.append(rjob)
+                    continue
+            waiting_jobs = waiting_jobs_tmp
+            
+        # matching algorithm
+        packings = Matching_Same.run(run_jobs_list)
+        for key, value in packings.items():
+            for packing in value:
+                print([packing_job.job_idx for packing_job in packing.packing_jobs])
+                print('gpu', [packing_job.num_gpu for packing_job in packing.packing_jobs])
+
+        print("_______________________new placement____________________")
+        # deal with the packing plan
+        CLUSTER.empty_infra()
+
+        # for rjob in JOBS.runnable_jobs:
+        #     if 'RUNNING' == rjob['status']:
+        #         if 'placements' in rjob: 
+        #             del rjob['placements'][:]
+        # packing_gpu_num_list = list(packings.keys())
+        # packing_gpu_num_list.sort(reverse=True)
+        # placement_cur = None
+        # for packing_gpu in packing_gpu_num_list:
+        #     for packing in packings[packing_gpu]:
+        #         for idx, packing_job in enumerate(packing.packing_jobs):
+
+        #             for rjob in JOBS.runnable_jobs:
+        #                 if rjob['job_idx'] == packing_job.job_idx:
+        #                     rjob['packing_used'] = True
+        #                     rjob['iteration_time_cur'] = packing.calc_iteration_time(packing.packing_jobs)
+        #                     if idx == 0:
+        #                         ret = try_get_job_res(rjob)
+        #                         assert ret==True
+        #                         placement_cur = rjob['placements']
+        #                         print('first')
+        #                     else:
+        #                         rjob['placements'] = copy.deepcopy(placement_cur)
+        #                         print('other')
+        #                     print(rjob['placements'])
+
+        #                     if sys.maxsize == rjob['start_time']:
+        #                         rjob['start_time'] = event_time
+        #                     if rjob['status'] == 'PENDING':
+        #                         run_jobs.append(rjob)
+        #                     break
+        
+        # for rjob in JOBS.runnable_jobs:
+        #     if rjob['packing_used'] == False and rjob['status'] == 'RUNNING':
+        #             preempt_jobs.append(rjob)
+
+        JOBS.runnable_jobs.sort(key = lambda e:e.__getitem__('num_gpu'), reverse=True)
+        tmp_job_placement = dict()
+        for rjob in JOBS.runnable_jobs:
+            # print("after packing: ", rjob['job_idx'], rjob['placements'])
+            if 'RUNNING' == rjob['status']:
+                if 'placements' in rjob: 
+                    del rjob['placements'][:]
+            ret = False
+            for key, value in packings.items():
+                for packing in value:
+                    for packing_job in packing.packing_jobs:
+                        if packing_job.job_idx == rjob['job_idx']:
+                            packing_cur = packing
+                            ret = True
+                            break
+                    if ret:
+                        break
+                if ret:
+                    break
+            if ret:
+                rjob['iteration_time_cur'] = packing_cur.calc_iteration_time(packing_cur.packing_jobs)
+                # print(rjob['num_gpu'], rjob['job_idx'])
+                if rjob['job_idx'] in tmp_job_placement:
+                    rjob['placements'] = tmp_job_placement[rjob['job_idx']]
+                    # print("other")
+                else:
+                    ret_1 = try_get_job_res(rjob)
+                    assert ret_1==True
+                    for packing_job in packing_cur.packing_jobs:
+                        tmp_job_placement[packing_job.job_idx] = copy.deepcopy(rjob['placements'])
+                    # print('first')
+                # print(rjob['placements'])
+                if sys.maxsize == rjob['start_time']:
+                    rjob['start_time'] = event_time
+                if rjob['status'] == 'PENDING':
+                    run_jobs.append(rjob)
+            else:
+                if rjob['status'] == 'RUNNING':
+                    preempt_jobs.append(rjob)
+                continue
+
+        for job in preempt_jobs:
+            job['status'] = 'PENDING'
+            job['preempt'] = int(job['preempt'] + 1)
+        for job in run_jobs:
+            job['status'] = 'RUNNING'
+            job['resume'] = int(job['resume'] + 1)
+
+        # get the next end_event
+        del end_events[:]
+        for rjob in JOBS.runnable_jobs:
+            if 'RUNNING' == rjob['status']:
+                end_time = float(event_time + rjob['remaining_time']/rjob['iteration_time']*rjob['iteration_time_cur'])
+                tmp_dict = util.search_dict_list(end_events, 'time', end_time)
+                if tmp_dict == None:
+                    #not found, add the time into to job_events
+                    tmp_dict = dict()
+                    tmp_dict['time'] = end_time
+                    tmp_dict['end_jobs'] = list()
+                    tmp_dict['end_jobs'].append(rjob)
+                    end_events.append(tmp_dict)
+                else:
+                    tmp_dict['end_jobs'].append(rjob)
+        end_events.sort(key = lambda e:e.__getitem__('time'))
+
+
+        LOG.checkpoint(event_time)        
 
 def sim_job_events():
     '''
@@ -2002,7 +2366,7 @@ def parse_job_dist():
         gi.append(cal_r_gittins_index(job_dict, int(v-1)))
 
     # print(gi)
-    job_dict['data'].append(sys.maxint)
+    job_dict['data'].append(sys.maxsize)
     gi.append(0.0)
     job_dict['gittins'] = gi
 
@@ -2025,6 +2389,9 @@ def main():
     # lp.placement(JOBS.job_list[0])
     ''' Prepare jobs'''
     JOBS.prepare_job_start_events()
+
+    # used gpu number of jobs
+    used_gpu = [8,4,2,1]
 
     # sim_job_events()
     if FLAGS.schedule == 'fifo':
@@ -2095,6 +2462,18 @@ def main():
         gandiva_sim_jobs(True, 1000)
     elif FLAGS.schedule == 'gpu-demands':
         sim_gpu_demands()
+    elif FLAGS.schedule == 'multi-resource-split':
+        multi_resource_split_sim_jobs()
+    elif FLAGS.schedule == 'multi-resource-split-gpu':
+        multi_resource_split_sim_jobs(True)
+    elif FLAGS.schedule == 'multi-resource-same':
+        multi_resource_same_sim_jobs()
+    elif FLAGS.schedule == 'multi-resource-same-gpu':
+        multi_resource_same_sim_jobs(True)
+    elif FLAGS.schedule == 'multi-resource-same-unaware':
+        multi_resource_same_sim_jobs(know_duration=False)
+    elif FLAGS.schedule == 'multi-resource-same-gpu-unaware':
+        multi_resource_same_sim_jobs(True, know_duration=False)
     else:
         one_queue_fifo_sim_jobs()
 

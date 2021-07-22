@@ -2,6 +2,7 @@ from __future__ import print_function
 import sys
 import subprocess
 import flags 
+import math
 FLAGS = flags.FLAGS
 
 def print_fn(log):
@@ -26,7 +27,7 @@ def search_dict_list(dict_list, key, value):
     for e in dict_list:
         # if e.has_key(key) == True:
         if key in e:
-            if e[key] == value:
+            if math.isclose(e[key], value, rel_tol=1e-5):
                 return e
 
     return None
