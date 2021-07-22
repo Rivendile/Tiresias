@@ -4,6 +4,7 @@ __pycache__
 test*
 plot*
 trace-data
-/simulator/*.txt
+*.txt
 *.csv
 *.xlsx
+.DS_Store
