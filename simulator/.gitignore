@@ -6,3 +6,4 @@ plot*
 trace-data
 /simulator/*.txt
 *.csv
+*.xlsx
