@@ -4,5 +4,4 @@ __pycache__
 test*
 plot*
 trace-data
-/simulator/*.csv
 /simulator/*.txt
