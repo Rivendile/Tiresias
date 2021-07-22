@@ -5,3 +5,4 @@ test*
 plot*
 trace-data
 /simulator/*.txt
+*.csv
